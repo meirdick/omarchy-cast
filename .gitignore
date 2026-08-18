@@ -1,0 +1,7 @@
+*.etag
+*.bak.*
+.clone.*
+*.qmlc
+*.jsc
+__pycache__/
+*.pyc

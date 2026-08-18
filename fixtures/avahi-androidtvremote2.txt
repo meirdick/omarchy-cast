@@ -1,0 +1,4 @@
++;wlp0s20f3;IPv6;Den\032TV;_androidtvremote2._tcp;local
++;wlp0s20f3;IPv4;Den\032TV;_androidtvremote2._tcp;local
+=;wlp0s20f3;IPv6;Den\032TV;_androidtvremote2._tcp;local;Android_1AV08283.local;192.168.2.140;6466;"bt=FC:91:5D:74:62:D3"
+=;wlp0s20f3;IPv4;Den\032TV;_androidtvremote2._tcp;local;Android_1AV08283.local;192.168.2.140;6466;"bt=FC:91:5D:74:62:D3"

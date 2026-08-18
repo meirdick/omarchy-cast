@@ -1,0 +1,143 @@
+{
+  "schemaVersion": 1,
+  "id": "meirdick.cast",
+  "name": "Cast",
+  "version": "1.0.0",
+  "author": "meirdick",
+  "license": "MIT",
+  "homepage": "https://github.com/meirdick/omarchy-cast",
+  "description": "Control media playing on Chromecast, Google TV, AirPlay and Android TV devices from the Omarchy bar. Shows what the TV in the other room is playing, and drives it. Silent when nothing is casting.",
+  "kinds": [
+    "bar-widget",
+    "service"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "barWidget": "Widget.qml",
+    "service": "Service.qml"
+  },
+  "barWidget": {
+    "displayName": "Cast",
+    "description": "What your cast devices are playing, and the controls to drive them. Discovers Chromecast, Google TV, AirPlay and Android TV devices over mDNS and holds a pushed connection, so the bar reflects a change on the TV in about a second. Shows nothing at all when nothing is playing.",
+    "category": "Media",
+    "aliases": [
+      "cast",
+      "chromecast",
+      "googlecast",
+      "google tv",
+      "airplay",
+      "android tv",
+      "tv",
+      "remote",
+      "nowplaying"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "pythonPath": "",
+      "backends": "cast,airplay,androidtv,avahi",
+      "barFormat": "full",
+      "maxTitle": 40,
+      "showDeviceName": true,
+      "hideWhenPaused": false,
+      "showGlyph": true,
+      "preferredDevice": "",
+      "volumeStep": 5,
+      "notifyTrack": false,
+      "helperRestartSec": 5
+    },
+    "schema": [
+      {
+        "key": "pythonPath",
+        "type": "string",
+        "label": "Python interpreter",
+        "description": "Which python runs the helper. Empty checks for the plugin's own virtualenv at ~/.local/share/omarchy/meirdick.cast/venv first, then falls back to python3 on PATH. Point this somewhere else if you installed the backend libraries into a different environment.",
+        "defaultValue": ""
+      },
+      {
+        "key": "backends",
+        "type": "string",
+        "label": "Enabled backends",
+        "description": "Comma-separated, from cast, airplay, androidtv and avahi. Each one is skipped automatically when its library is missing, so this is for turning off a backend you have installed but do not want — scanning for AirPlay devices you do not own, for instance. \"avahi\" is the dependency-free fallback and only runs when the real cast backend cannot.",
+        "defaultValue": "cast,airplay,androidtv,avahi"
+      },
+      {
+        "key": "barFormat",
+        "type": "enum",
+        "label": "Bar format",
+        "description": "How much reaches the bar. \"compact\" drops the device name and shows only what is playing; \"icon\" keeps everything in the panel and shows just the glyph.",
+        "options": [
+          "full",
+          "compact",
+          "icon"
+        ],
+        "defaultValue": "full"
+      },
+      {
+        "key": "maxTitle",
+        "type": "integer",
+        "label": "Longest text in the bar",
+        "description": "Characters before what is playing gets cut. The default fits an ordinary \"Artist — Title\" without truncating it. The full text is always in the hover and the panel.",
+        "min": 8,
+        "max": 90,
+        "step": 2,
+        "defaultValue": 40
+      },
+      {
+        "key": "showDeviceName",
+        "type": "boolean",
+        "label": "Show which device it is on",
+        "description": "Prefixes the bar with the device name, so \"Den TV: Chris Stapleton — Hard Livin'\". Worth turning off when you only ever cast to one thing.",
+        "defaultValue": true
+      },
+      {
+        "key": "hideWhenPaused",
+        "type": "boolean",
+        "label": "Hide while paused",
+        "description": "Off by default: a paused device is still holding your session and is the thing you are most likely to want to resume. Turn this on to reclaim the bar slot the moment playback stops.",
+        "defaultValue": false
+      },
+      {
+        "key": "showGlyph",
+        "type": "boolean",
+        "label": "Show the state glyph",
+        "description": "The small play, pause or buffering mark before the text.",
+        "defaultValue": true
+      },
+      {
+        "key": "preferredDevice",
+        "type": "string",
+        "label": "Preferred device",
+        "description": "The device id that keeps the bar when several are playing at once. Set from the panel by pressing p on a device rather than typed here. Empty means whichever started most recently wins.",
+        "defaultValue": ""
+      },
+      {
+        "key": "volumeStep",
+        "type": "integer",
+        "label": "Volume step (%)",
+        "description": "How far one scroll of the wheel moves the volume. Android TV devices only accept volume as up and down key presses, so the step there is approximate.",
+        "min": 1,
+        "max": 25,
+        "step": 1,
+        "defaultValue": 5
+      },
+      {
+        "key": "notifyTrack",
+        "type": "boolean",
+        "label": "Notify on track change",
+        "description": "Off by default. A widget meant to be glanced at should not also be shouting.",
+        "defaultValue": false
+      },
+      {
+        "key": "helperRestartSec",
+        "type": "integer",
+        "label": "Helper restart delay (seconds)",
+        "description": "How long to wait before restarting the helper process if it exits. Doubles on each consecutive failure up to a minute, so a helper that cannot start does not spin.",
+        "min": 1,
+        "max": 60,
+        "step": 1,
+        "defaultValue": 5
+      }
+    ]
+  }
+}
