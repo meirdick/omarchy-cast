@@ -56,6 +56,10 @@ function capabilities(raw) {
     prev: bool(source.prev),
     stop: bool(source.stop),
     volume: bool(source.volume),
+    // Some devices have no volume scale at all and can only be nudged up and
+    // down — a Google TV passing audio to a receiver over HDMI-CEC, for one.
+    // The panel draws step buttons for those instead of a slider.
+    volumeSteps: bool(source.volumeSteps),
     mute: bool(source.mute),
     keys: bool(source.keys),
     power: bool(source.power)

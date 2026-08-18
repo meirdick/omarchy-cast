@@ -117,6 +117,7 @@ def device_record(**kw):
             "prev": False,
             "stop": False,
             "volume": False,
+            "volumeSteps": False,
             "mute": False,
             "keys": False,
             "power": False,
@@ -1404,6 +1405,14 @@ class AndroidTVBackend(Backend):
         remote = AndroidTVRemote("Omarchy Cast", certfile, keyfile, found["host"])
         try:
             await remote.async_generate_cert_if_missing()
+            # The library writes these 0644. A client key that authenticates to
+            # a device on the network has no business being world-readable.
+            for path in (certfile, keyfile):
+                try:
+                    if os.path.exists(path):
+                        os.chmod(path, 0o600)
+                except OSError:
+                    pass
         except Exception as exc:
             log("androidtv cert generation failed for %s: %s" % (ident, exc))
             with self._lock:
@@ -1450,13 +1459,19 @@ class AndroidTVBackend(Backend):
         paired = bool(info.get("paired"))
         volume = -1.0
         muted = False
+        has_scale = False
         if paired:
             try:
                 vol = getattr(remote, "volume_info", None) or {}
                 level = as_float(vol.get("level"), -1.0)
                 maximum = as_float(vol.get("max"), 0.0)
+                # max is 0 on a device that passes audio through to a TV or
+                # receiver over HDMI-CEC: it has no scale of its own and can
+                # only be nudged. Reporting a level here would draw a slider
+                # that neither reflects nor sets the real volume.
                 if level >= 0 and maximum > 0:
                     volume = level / maximum
+                    has_scale = True
                 muted = bool(vol.get("muted", False))
             except Exception:
                 pass
@@ -1482,7 +1497,8 @@ class AndroidTVBackend(Backend):
             muted=muted,
             paired=paired,
             detail="" if paired else "needs pairing",
-            can={"volume": paired, "mute": paired, "keys": paired,
+            can={"volume": paired and has_scale, "volumeSteps": paired,
+                 "mute": paired, "keys": paired,
                  "power": paired, "pause": paired, "next": paired,
                  "prev": paired},
         ))
@@ -1535,11 +1551,10 @@ class AndroidTVBackend(Backend):
                 pass
             key = "KEYCODE_VOLUME_UP" if target > current else "KEYCODE_VOLUME_DOWN"
             steps = max(1, min(10, int(abs(target - current) * 20)))
-            try:
-                for _ in range(steps):
-                    remote.send_key_command(key)
-            except Exception as exc:
-                return False, str(exc)
+            for index in range(steps):
+                ok, detail = self._send_key(remote, ident, key)
+                if not ok:
+                    return False, detail
             self.publish(ident)
             return True, ""
 
@@ -1548,12 +1563,45 @@ class AndroidTVBackend(Backend):
         )
         if not key:
             return False, "unknown command"
-        try:
-            remote.send_key_command(key)
-        except Exception as exc:
-            return False, str(exc)
+        ok, detail = self._send_key(remote, ident, key)
+        if not ok:
+            return False, detail
         threading.Timer(0.4, self.publish, args=(ident,)).start()
         return True, ""
+
+    def _send_key(self, remote, ident, key):
+        """Send one key, reconnecting once if the link has gone away.
+
+        The device drops the connection whenever it sleeps, and accepts only
+        one session per client certificate — so anything else authenticating
+        with the same cert silently evicts us. keep_reconnecting() heals that
+        eventually, but a button pressed in the meantime would fail for no
+        reason the user can see. One synchronous retry closes that window.
+        """
+        try:
+            remote.send_key_command(key)
+            return True, ""
+        except Exception as exc:
+            if "disconnect" not in str(exc).lower():
+                return False, str(exc)
+
+        future = ISLAND.submit(remote.async_connect())
+        if future is None:
+            return False, "async loop unavailable"
+        try:
+            future.result(timeout=10)
+        except Exception as exc:
+            return False, "reconnect failed: %s" % exc
+
+        try:
+            remote.keep_reconnecting()
+        except Exception:
+            pass
+        try:
+            remote.send_key_command(key)
+            return True, ""
+        except Exception as exc:
+            return False, str(exc)
 
     def _pair(self, remote, ident, payload):
         code = as_text(payload.get("code", "")).strip()

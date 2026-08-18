@@ -157,16 +157,15 @@ Item {
   // backend, and a user who ran `pacman -S python-pychromecast` still gets Cast.
   readonly property string venvPython:
     Quickshell.env("HOME") + "/.local/share/omarchy/meirdick.cast/venv/bin/python"
-  property bool venvExists: false
-  readonly property string pythonPath:
-    pythonSetting !== "" ? pythonSetting : (venvExists ? venvPython : "python3")
 
-  FileView {
-    path: root.venvPython
-    printErrors: false
-    onLoaded: root.venvExists = true
-    onLoadFailed: root.venvExists = false
-  }
+  // Which interpreter to use is decided by sh at launch, not by QML.
+  //
+  // Testing for the venv with a FileView meant pointing a file reader at a
+  // five-megabyte executable, and its loaded/failed result flipped
+  // `pythonPath` back and forth. Every flip restarted the helper, which threw
+  // away any pairing session in progress — the code you typed went to a
+  // process that no longer existed.
+  readonly property string pythonPath: pythonSetting
 
   readonly property string helperPath: Qt.resolvedUrl("bin/omarchy-cast-helper.py")
     .toString().replace(/^file:\/\//, "")
@@ -223,9 +222,14 @@ Item {
     if (helper.running) return
     root.ready = false
     root.backends = []
-    var argv = [root.pythonPath, root.helperPath]
-    if (root.backendList !== "") argv.push("--only=" + root.backendList)
-    helper.command = argv
+
+    var script =
+      'if [ -n "$1" ]; then exec "$1" "$3" "$4"; ' +
+      'elif [ -x "$2" ]; then exec "$2" "$3" "$4"; ' +
+      'else exec python3 "$3" "$4"; fi'
+    var only = root.backendList !== "" ? "--only=" + root.backendList : "--only=cast,airplay,androidtv,avahi"
+    helper.command = ["sh", "-c", script, "sh",
+                      root.pythonSetting, root.venvPython, root.helperPath, only]
     helper.running = true
     root.helperRunning = true
   }
@@ -353,8 +357,8 @@ Item {
       helperRunning: root.helperRunning,
       helperFailures: root.helperFailures,
       helperVersion: root.helperVersion,
-      python: root.pythonPath,
-      venvExists: root.venvExists,
+      pythonOverride: root.pythonSetting,
+      venvPython: root.venvPython,
       backendsRequested: root.backendList,
       backendsRunning: root.backends,
       missing: root.missing,

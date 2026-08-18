@@ -97,8 +97,16 @@ Panel {
   Connections {
     target: root.service
     function onPairingChanged(id, pairState) {
-      if (pairState === "awaiting-code") root.pairingFor = id
-      else if (pairState === "paired" || pairState === "failed") root.pairingFor = ""
+      if (pairState === "awaiting-code") {
+        root.pairingFor = id
+        // The panel's key catcher owns focus, so the field is visible but
+        // deaf until focus is moved to it. callLater because the field does
+        // not exist yet at the moment `pairingFor` is assigned.
+        Qt.callLater(function () { codeField.forceActiveFocus() })
+      } else if (pairState === "paired" || pairState === "failed") {
+        root.pairingFor = ""
+        Qt.callLater(function () { keyCatcher.forceActiveFocus() })
+      }
     }
   }
 
@@ -130,6 +138,7 @@ Panel {
     if (device.paired === false) {
       service.startPairing(device.id)
       root.pairingFor = device.id
+      Qt.callLater(function () { codeField.forceActiveFocus() })
       return
     }
     if (device.can.pause) service.playPause(device.id)
@@ -207,9 +216,15 @@ Panel {
     function pair(id: string, code: string): string {
       var device = root.resolve(id)
       if (!device) return "no such device"
-      if (String(code) === "") root.service.startPairing(device.id)
-      else root.service.finishPairing(device.id, code)
-      return device.id
+      // Sending a code is only meaningful inside a session the helper is
+      // already holding, so start one first when the caller has not.
+      if (String(code) === "") {
+        root.service.startPairing(device.id)
+        return "pairing started for " + device.id + " — the code is on the TV"
+      }
+      root.pairingFor = device.id
+      root.service.finishPairing(device.id, code)
+      return "code sent to " + device.id
     }
 
     function state(): string {
@@ -512,10 +527,47 @@ Panel {
             }
           }
 
+          // Step buttons, for a device that has no volume scale to slide along.
+          // A Google TV passing audio to a receiver over HDMI-CEC reports
+          // max == 0 and accepts only up and down presses.
+          RowLayout {
+            Layout.fillWidth: true
+            spacing: Style.spacing.controlGap
+            visible: !!root.focusDevice && !root.focusDevice.can.volume
+              && root.focusDevice.can.volumeSteps
+
+            Text {
+              text: "Volume"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+            Button {
+              text: "󰝞"
+              onClicked: root.act(function (d) { root.service.nudgeVolume(d.id, -1) })
+            }
+            Button {
+              text: "󰝝"
+              onClicked: root.act(function (d) { root.service.nudgeVolume(d.id, 1) })
+            }
+            Button {
+              text: "󰝟"
+              onClicked: root.act(function (d) { root.service.setMuted(d.id, !d.muted) })
+            }
+            Item { Layout.fillWidth: true }
+            Text {
+              text: "steps only"
+              color: root.fainter
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
+
+          // Neither a scale nor steps: say why rather than showing nothing.
           Text {
             Layout.fillWidth: true
             visible: !!root.focusDevice && root.focusDevice.volumeFixed
-              && !root.focusDevice.can.volume
+              && !root.focusDevice.can.volume && !root.focusDevice.can.volumeSteps
             text: "Volume is controlled by the TV. Pair the Android TV remote to change it from here."
             color: root.fainter
             font.family: root.fontFamily
@@ -541,10 +593,15 @@ Panel {
             TextField {
               id: codeField
               Layout.fillWidth: true
-              placeholderText: "6 digits"
+              placeholderText: "6 digits, then enter"
               onAccepted: {
                 root.submitCode(text)
                 text = ""
+              }
+              Keys.onEscapePressed: {
+                root.pairingFor = ""
+                text = ""
+                Qt.callLater(function () { keyCatcher.forceActiveFocus() })
               }
             }
           }
