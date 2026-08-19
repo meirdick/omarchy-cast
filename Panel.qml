@@ -283,7 +283,7 @@ Panel {
       // every unnamed cast fail. One device means there is nothing to choose
       // between; several means the caller has to say which.
       if (service.barDevice) return service.barDevice
-      var usable = list.filter(function (d) { return d.mediaId !== "" })
+      var usable = list.filter(root.canReceiveCast)
       return usable.length === 1 ? usable[0] : null
     }
 
@@ -302,16 +302,37 @@ Panel {
     return null
   }
 
+  // Whether a device could actually be handed something to play. An unpaired
+  // receiver will refuse the connection, and a remote-only device has no media
+  // session to load into — neither is a real candidate, and offering them as
+  // choices turns "cast this" into a question with one true answer and several
+  // wrong ones.
+  function canReceiveCast(device) {
+    if (!device || device.mediaId === "") return false
+    if (device.needsPairing === true && !device.parts.cast) return false
+    return !!(device.parts.cast || device.parts.airplay)
+  }
+
   // An error that names the alternatives, rather than one that just says no.
   function noSuchDevice(id) {
     if (!service || service.devices.length === 0) {
       return "no devices found on the network"
     }
-    var names = service.devices.map(function (d) { return "\"" + d.name + "\"" })
-    if (String(id || "") === "") {
-      return "several devices — name one of: " + names.join(", ")
+    var wanted = String(id || "")
+    if (wanted === "") {
+      var usable = service.devices.filter(root.canReceiveCast)
+      if (usable.length === 0) {
+        var blocked = service.devices.map(function (d) {
+          return d.name + (d.needsPairing ? " (not paired)" : "")
+        })
+        return "no device can accept a cast — " + blocked.join(", ")
+      }
+      return "several devices — name one of: " + usable.map(function (d) {
+        return "\"" + d.name + "\""
+      }).join(", ")
     }
-    return "no device matching \"" + id + "\" — found: " + names.join(", ")
+    var names = service.devices.map(function (d) { return "\"" + d.name + "\"" })
+    return "no device matching \"" + wanted + "\" — found: " + names.join(", ")
   }
 
   // ------------------------------------------------------------------ panel
