@@ -55,8 +55,16 @@ says which ones are absent and why rather than leaving you to guess.
 
 ## Casting a local file
 
+The wrapper lives in the plugin, so put it on your PATH once if you want the
+short form. The plugin never does this for you — it installs nothing outside
+its own directory:
+
 ```bash
-omarchy-cast video.mp4                 # to whatever is playing, or the only device
+ln -s ~/.config/omarchy/plugins/meirdick.cast/bin/omarchy-cast ~/.local/bin/
+```
+
+```bash
+omarchy-cast video.mp4                 # to the only device, or whatever is playing
 omarchy-cast video.mp4 "Den TV"        # to a named device
 omarchy-cast --stop                    # stop, and close the socket
 omarchy-cast --list                    # what is on the network

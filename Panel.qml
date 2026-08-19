@@ -190,35 +190,35 @@ Panel {
 
     function playPause(id: string): string {
       var device = root.resolve(id)
-      if (!device) return "no such device"
+      if (!device) return root.noSuchDevice(id)
       root.service.playPause(device)
       return device.id
     }
 
     function next(id: string): string {
       var device = root.resolve(id)
-      if (!device) return "no such device"
+      if (!device) return root.noSuchDevice(id)
       root.service.next(device)
       return device.id
     }
 
     function previous(id: string): string {
       var device = root.resolve(id)
-      if (!device) return "no such device"
+      if (!device) return root.noSuchDevice(id)
       root.service.previous(device)
       return device.id
     }
 
     function volume(id: string, level: string): string {
       var device = root.resolve(id)
-      if (!device) return "no such device"
+      if (!device) return root.noSuchDevice(id)
       root.service.setVolume(device, parseFloat(level))
       return device.id
     }
 
     function pair(id: string, code: string): string {
       var device = root.resolve(id)
-      if (!device) return "no such device"
+      if (!device) return root.noSuchDevice(id)
       // Sending a code is only meaningful inside a session the helper is
       // already holding, so start one first when the caller has not.
       if (String(code) === "") {
@@ -232,7 +232,7 @@ Panel {
 
     function castFile(path: string, id: string): string {
       var device = root.resolve(id)
-      if (!device) return "no such device"
+      if (!device) return root.noSuchDevice(id)
       if (String(path) === "") return "give a file path"
       root.service.castFile(device, path, "")
       return "casting " + path + " to " + device.name
@@ -240,7 +240,7 @@ Panel {
 
     function stopCast(id: string): string {
       var device = root.resolve(id)
-      if (!device) return "no such device"
+      if (!device) return root.noSuchDevice(id)
       root.service.stopCast(device)
       return "stopped"
     }
@@ -274,16 +274,44 @@ Panel {
   // do twice.
   function resolve(id) {
     if (!service) return null
-    var wanted = String(id || "").toLowerCase()
     var list = service.devices
-    if (wanted === "") return service.barDevice
+    var wanted = String(id || "").toLowerCase()
+
+    if (wanted === "") {
+      // Whatever is playing, if anything — but "nothing is playing" is the
+      // normal state when starting a cast, so falling back to it alone made
+      // every unnamed cast fail. One device means there is nothing to choose
+      // between; several means the caller has to say which.
+      if (service.barDevice) return service.barDevice
+      var usable = list.filter(function (d) { return d.mediaId !== "" })
+      return usable.length === 1 ? usable[0] : null
+    }
+
     for (var i = 0; i < list.length; i++) {
       if (list[i].id.toLowerCase() === wanted) return list[i]
     }
+    // Any part id, so an id copied out of diagnose still resolves.
     for (var j = 0; j < list.length; j++) {
-      if (list[j].name.toLowerCase().indexOf(wanted) >= 0) return list[j]
+      for (var kind in list[j].parts) {
+        if (String(list[j].parts[kind]).toLowerCase() === wanted) return list[j]
+      }
+    }
+    for (var k = 0; k < list.length; k++) {
+      if (list[k].name.toLowerCase().indexOf(wanted) >= 0) return list[k]
     }
     return null
+  }
+
+  // An error that names the alternatives, rather than one that just says no.
+  function noSuchDevice(id) {
+    if (!service || service.devices.length === 0) {
+      return "no devices found on the network"
+    }
+    var names = service.devices.map(function (d) { return "\"" + d.name + "\"" })
+    if (String(id || "") === "") {
+      return "several devices — name one of: " + names.join(", ")
+    }
+    return "no device matching \"" + id + "\" — found: " + names.join(", ")
   }
 
   // ------------------------------------------------------------------ panel
