@@ -208,6 +208,30 @@ try:
 
     fs.release(sample)
     eq("releasing stops serving it", fs.serving, 0)
+
+    # Casting a second file to the same device must withdraw the first.
+    # Without this every file cast during a session stays fetchable on the
+    # network until the helper exits — a growing set of readable files nobody
+    # asked to keep sharing.
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp2:
+        tmp2.write(b"y" * 32)
+        second = tmp2.name
+    try:
+        fs.url_for(sample, "127.0.0.1", owner="cast:a")
+        eq("first file published", fs.serving, 1)
+        fs.url_for(second, "127.0.0.1", owner="cast:a")
+        eq("the same device replaces rather than accumulates", fs.serving, 1)
+        eq("and it is the newer file", fs.published(), [os.path.realpath(second)])
+
+        # A different device is a different slot: two TVs may each hold one.
+        fs.url_for(sample, "127.0.0.1", owner="cast:b")
+        eq("a second device gets its own slot", fs.serving, 2)
+        fs.release(owner="cast:b")
+        eq("releasing one device leaves the other", fs.serving, 1)
+        fs.release(owner="cast:a")
+        eq("and releasing the last stops the server", fs.serving, 0)
+    finally:
+        os.unlink(second)
 finally:
     fs.stop()
     os.unlink(sample)

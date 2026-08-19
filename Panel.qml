@@ -247,7 +247,7 @@ Panel {
 
     function serving(): string {
       if (!root.service) return ""
-      return root.service.servingPath
+      return root.service.published.join("\n")
     }
 
     function state(): string {
@@ -779,8 +779,13 @@ Panel {
           // LAN. Saying so plainly is the least the widget can do.
           Text {
             Layout.fillWidth: true
-            visible: !!root.service && root.service.servingPath !== ""
-            text: "Serving a file to this device over your network · s to stop"
+            visible: !!root.service && root.service.serving
+            text: {
+              if (!root.service) return ""
+              var count = root.service.published.length
+              return (count > 1 ? count + " files are" : "A file is")
+                + " being served over your network · s to stop"
+            }
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

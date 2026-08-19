@@ -331,8 +331,11 @@ class _OneFileHandler(http.server.BaseHTTPRequestHandler):
 
     def _resolve(self):
         token = urllib.parse.urlparse(self.path).path.lstrip("/")
-        path = self._files.get(token)
-        if not path or not os.path.isfile(path):
+        entry = self._files.get(token)
+        if not entry:
+            return None
+        path = entry[0]
+        if not os.path.isfile(path):
             return None
         return path
 
@@ -414,8 +417,14 @@ class FileServer:
         self._port = port
         self._lock = threading.Lock()
 
-    def url_for(self, path, device_host):
-        """Publish one file and return the URL the device should fetch."""
+    def url_for(self, path, device_host, owner=""):
+        """Publish one file and return the URL the device should fetch.
+
+        `owner` is the device the file is for. Publishing a second file for the
+        same device withdraws the first: without that, every file cast during a
+        session stays fetchable on the network until the helper exits, which is
+        a growing set of readable files nobody asked to keep sharing.
+        """
         real = os.path.realpath(os.path.expanduser(str(path)))
         if not os.path.isfile(real):
             raise ValueError("not a file: %s" % real)
@@ -448,20 +457,32 @@ class FileServer:
                 self._thread.start()
                 log("file server listening on %s:%d" % self._httpd.server_address)
 
+            if owner:
+                for stale in [t for t, entry in self._files.items()
+                              if entry[1] == owner]:
+                    del self._files[stale]
+
             token = secrets.token_urlsafe(16)
-            self._files[token] = real
+            self._files[token] = (real, owner)
             host, port = self._httpd.server_address
 
         return "http://%s:%d/%s" % (host, port, token), real
 
-    def release(self, path=None):
-        """Forget one file, or all of them, and stop listening if idle."""
+    def release(self, path=None, owner=None):
+        """Forget one file, everything for one device, or all of it."""
         with self._lock:
-            if path is None:
+            if path is None and owner is None:
                 self._files.clear()
             else:
-                real = os.path.realpath(os.path.expanduser(str(path)))
-                for token in [t for t, p in self._files.items() if p == real]:
+                real = (os.path.realpath(os.path.expanduser(str(path)))
+                        if path else None)
+                doomed = []
+                for token, (entry_path, entry_owner) in self._files.items():
+                    if real is not None and entry_path == real:
+                        doomed.append(token)
+                    elif owner is not None and entry_owner == owner:
+                        doomed.append(token)
+                for token in doomed:
                     del self._files[token]
             if not self._files:
                 self._shutdown_locked()
@@ -485,6 +506,11 @@ class FileServer:
     def serving(self):
         with self._lock:
             return len(self._files)
+
+    def published(self):
+        """Every file currently reachable, so the panel can show them all."""
+        with self._lock:
+            return sorted({entry[0] for entry in self._files.values()})
 
 
 FILES = FileServer()
@@ -891,7 +917,7 @@ class CastBackend(Backend):
                 try:
                     mc.stop()
                 finally:
-                    FILES.release(payload.get("path"))
+                    FILES.release(owner="cast:" + key)
                 return True, ""
             elif cmd == "quit":
                 cast.quit_app()
@@ -926,7 +952,7 @@ class CastBackend(Backend):
             return False, "device address unknown"
 
         try:
-            url, real = FILES.url_for(path, host)
+            url, real = FILES.url_for(path, host, owner="cast:" + key)
         except Exception as exc:
             return False, str(exc)
 
@@ -943,11 +969,12 @@ class CastBackend(Backend):
             mc.play_media(url, mime, title=title, stream_type="BUFFERED")
             mc.block_until_active(timeout=30)
         except Exception as exc:
-            FILES.release(real)
+            FILES.release(owner="cast:" + key)
             return False, "the device refused it: %s" % exc
 
         emit({"type": "casting", "id": "cast:" + key, "path": real,
               "url": url, "title": title, "mime": mime,
+              "published": FILES.published(),
               "video": probe.get("video", ""), "audio": probe.get("audio", "")})
         threading.Timer(1.0, self.publish, args=(key,)).start()
         return True, ""
@@ -1652,7 +1679,7 @@ class AirPlayBackend(Backend):
                     host = as_text(getattr(conf, "address", ""))
                 if not path or not host:
                     return False, "no path or address"
-                url, real = FILES.url_for(path, host)
+                url, real = FILES.url_for(path, host, owner="airplay:" + ident)
                 warning = codec_warning(probe_media(real))
                 if warning:
                     emit({"type": "warning", "id": "airplay:" + ident,
@@ -1661,7 +1688,7 @@ class AirPlayBackend(Backend):
                 emit({"type": "casting", "id": "airplay:" + ident,
                       "path": real, "url": url})
             elif cmd == "stopCast":
-                FILES.release(payload.get("path"))
+                FILES.release(owner="airplay:" + ident)
                 await rc.stop()
             elif cmd == "refresh":
                 pass

@@ -129,11 +129,20 @@ Item {
   property bool helperRunning: false
   property int helperFailures: 0
 
-  // The file currently published over HTTP, if any. Worth surfacing: a socket
-  // is open on the LAN for as long as this is set, and the user should be able
-  // to see that without reading a log.
+  // What is currently published over HTTP. Worth surfacing plainly: a socket is
+  // open on the LAN for as long as this is non-empty, and nobody should have to
+  // read a log to discover their machine is sharing a file.
+  property var published: []
   property string servingPath: ""
   property string servingTitle: ""
+  readonly property bool serving: published.length > 0
+
+  // A receiver reports IDLE in the gap between accepting a LOAD and starting
+  // playback. Withdrawing the file on that IDLE closes the socket before the
+  // device has fetched a byte, so the cast dies at "0:00" — which is exactly
+  // the symptom a firewall produces, and just as confusing. The file is only
+  // withdrawn once playback has actually been seen.
+  property bool castHasPlayed: false
 
   // The device that owns the bar. Null is the resting state, and the widget
   // renders nothing at all when it is.
@@ -289,12 +298,20 @@ Item {
       var id = String(parsed.id)
       root.deviceUpdated(id)
       var now = Devices.get(root.state, id)
-      if (now && root.servingPath !== "" &&
-          (now.state === "IDLE" || now.state === "OFFLINE")) {
-        // Playback ended, so the socket has no reason to stay open.
-        root.send({ cmd: "stopCast", id: id, path: root.servingPath })
-        root.servingPath = ""
-        root.servingTitle = ""
+      if (now && root.published.length > 0) {
+        if (now.state === "PLAYING" || now.state === "PAUSED" ||
+            now.state === "BUFFERING") {
+          root.castHasPlayed = true
+        } else if (root.castHasPlayed &&
+                   (now.state === "IDLE" || now.state === "OFFLINE")) {
+          // Playback really has ended, so the file has no reason to stay
+          // reachable on the network.
+          root.send({ cmd: "stopCast", id: id })
+          root.servingPath = ""
+          root.servingTitle = ""
+          root.published = []
+          root.castHasPlayed = false
+        }
       }
       if (now && now.title !== "" &&
           (!before || before.title !== now.title || before.artist !== now.artist)) {
@@ -316,6 +333,12 @@ Item {
     } else if (parsed.type === "casting") {
       root.servingPath = String(parsed.path || "")
       root.servingTitle = String(parsed.title || "")
+      // The helper is the authority on what is reachable; mirroring its list
+      // avoids the widget claiming a file is still shared after it was
+      // withdrawn, or missing one that is.
+      root.published = Array.isArray(parsed.published)
+        ? parsed.published : [root.servingPath]
+      root.castHasPlayed = false
       root.lastWarning = ""
     } else if (parsed.type === "warning") {
       root.lastWarning = String(parsed.message || "")
@@ -427,10 +450,11 @@ Item {
   }
 
   function stopCast(target) {
-    var path = root.servingPath
     root.servingPath = ""
     root.servingTitle = ""
-    return send({ cmd: "stopCast", id: root.route(target, "seek"), path: path })
+    root.published = []
+    root.castHasPlayed = false
+    return send({ cmd: "stopCast", id: root.route(target, "seek") })
   }
 
   function refresh() { root.send({ cmd: "refresh" }) }
@@ -455,10 +479,12 @@ Item {
       }),
       rawDevices: Devices.raw(root.state).map(function (d) {
         return { id: d.id, kind: d.kind, host: d.host, state: d.state,
-                 paired: d.paired }
+                 paired: d.paired, app: d.app, title: d.title,
+                 volume: d.volume, volumeFixed: d.volumeFixed, can: d.can }
       }),
       barDevice: root.barDevice ? root.barDevice.id : "",
       servingPath: root.servingPath,
+      published: root.published,
       lastError: root.lastError,
       lastWarning: root.lastWarning
     }, null, 2)
