@@ -236,7 +236,10 @@ function deviceRow(device, now, selectedId) {
     // A device that is not paired cannot be driven at all, and saying so on
     // the row is the only place the user will look before clicking a button
     // that would do nothing.
-    needsPairing: device.paired === false
+    // A merged device can be perfectly usable over one protocol while another
+    // is unpaired, so this asks whether anything is left to unlock rather than
+    // whether the device as a whole is paired.
+    needsPairing: device.needsPairing === true || device.paired === false
   }
 }
 

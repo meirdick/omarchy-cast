@@ -183,10 +183,154 @@ function apply(state, line) {
   return state
 }
 
+// ------------------------------------------------------------------ merging
+//
+// One physical device can answer on several protocols, and the user does not
+// care. A Google TV Streamer appears twice — once over Cast, which carries the
+// track metadata and transport, and once over Android TV Remote, which carries
+// volume and the D-pad. Listing both is an implementation detail leaking onto
+// the screen, and a harmful one: the row showing the track is not the row that
+// can change the volume, so volume looks broken.
+//
+// They are merged on IP address, which is the only identifier the two
+// protocols share. A device with no address is never merged, because guessing
+// from a friendly name would eventually fuse two real devices called "TV".
+
+// Which protocol's view of "what is playing" to trust, best first. Android TV
+// Remote reports only a package name and never a track, so it always loses.
+var MEDIA_PRIORITY = { cast: 3, airplay: 2, androidtv: 1 }
+
+function mergeKey(device) {
+  return device.host ? "host:" + device.host : "id:" + device.id
+}
+
+function mergedLabel(parts) {
+  if (parts.cast && parts.androidtv) return "Google TV"
+  var kinds = Object.keys(parts)
+  if (kinds.length === 1) return KIND_LABELS[kinds[0]] || kinds[0]
+  return kinds.map(function (k) { return KIND_LABELS[k] || k }).join(" + ")
+}
+
+function mergeGroup(group) {
+  if (group.length === 1) {
+    var only = group[0]
+    var single = {}
+    for (var key in only) single[key] = only[key]
+    single.parts = {}
+    single.parts[only.kind] = only.id
+    single.mediaId = only.id
+    single.volumeId = (only.can.volume || only.can.volumeSteps) ? only.id : ""
+    single.keyId = only.can.keys ? only.id : ""
+    // Set on both paths, so callers never have to ask the question two ways.
+    single.needsPairing = only.paired === false
+    return single
+  }
+
+  var parts = {}
+  for (var i = 0; i < group.length; i++) parts[group[i].kind] = group[i].id
+
+  // The base is whichever source has the most authoritative view of playback:
+  // one that is actually playing beats one that merely could.
+  var base = group[0]
+  for (var j = 1; j < group.length; j++) {
+    var candidate = group[j]
+    var better = ACTIVE[candidate.state] === true && ACTIVE[base.state] !== true
+    var samePlayback = (ACTIVE[candidate.state] === true) === (ACTIVE[base.state] === true)
+    if (better ||
+        (samePlayback &&
+         (MEDIA_PRIORITY[candidate.kind] || 0) > (MEDIA_PRIORITY[base.kind] || 0))) {
+      base = candidate
+    }
+  }
+
+  var merged = {}
+  for (var field in base) merged[field] = base[field]
+  merged.parts = parts
+  merged.mediaId = base.id
+  merged.kindLabel = mergedLabel(parts)
+
+  // Capabilities are the union, and each one remembers which source provides
+  // it, because that is where the command has to be sent.
+  merged.can = capabilities({})
+  merged.volumeId = ""
+  merged.keyId = ""
+  var hasScale = false
+
+  for (var k = 0; k < group.length; k++) {
+    var part = group[k]
+    for (var name in part.can) {
+      if (part.can[name]) merged.can[name] = true
+    }
+    if (part.can.keys && merged.keyId === "") merged.keyId = part.id
+    // Prefer a source with a real, settable scale over one that can only
+    // step. volumeFixed is the trap here: a Cast receiver attached to a TV
+    // reports a readable level and then drops every attempt to change it, so
+    // it must not win over an Android TV remote that can actually move the
+    // volume, even though stepping is the cruder mechanism.
+    if (part.can.volume && part.volume >= 0 && !part.volumeFixed && !hasScale) {
+      merged.volumeId = part.id
+      merged.volume = part.volume
+      merged.muted = part.muted
+      merged.volumeFixed = part.volumeFixed
+      hasScale = true
+    } else if (part.can.volumeSteps && merged.volumeId === "") {
+      merged.volumeId = part.id
+      merged.volumeFixed = part.volumeFixed
+    } else if (part.can.volume && part.volume >= 0 && merged.volume < 0) {
+      // Nothing better available: show the level even though setting it will
+      // be refused. The panel reads volumeFixed and offers no control.
+      merged.volume = part.volume
+      merged.muted = part.muted
+      merged.volumeFixed = part.volumeFixed
+    }
+    if (part.paired === false) merged.needsPairing = true
+    if (part.error && !merged.error) merged.error = part.error
+  }
+  if (!hasScale) merged.can.volume = false
+
+  // Merged devices report paired only when every part is. An unpaired part is
+  // a capability the user has not unlocked yet, not a broken device.
+  merged.paired = group.every(function (d) { return d.paired !== false })
+  if (!merged.paired && !merged.detail) merged.detail = "pair for volume and keys"
+  return merged
+}
+
+function merge(devices) {
+  var groups = {}
+  var order = []
+  for (var i = 0; i < (devices || []).length; i++) {
+    var key = mergeKey(devices[i])
+    if (!groups[key]) { groups[key] = []; order.push(key) }
+    groups[key].push(devices[i])
+  }
+  return order.map(function (key) { return mergeGroup(groups[key]) })
+}
+
+// Where a given command has to be sent for a merged device. Transport and seek
+// go to whichever source owns the media session; volume and keys may live on a
+// different protocol entirely.
+function routeFor(device, cmd) {
+  if (!device) return ""
+  if (cmd === "volume" || cmd === "mute") return device.volumeId || device.mediaId || device.id
+  if (cmd === "key" || cmd === "power") return device.keyId || device.id
+  return device.mediaId || device.id
+}
+
 // Devices in a stable order. Discovery order, not alphabetical: a device that
 // appears while the panel is open should join the end of the list rather than
 // pushing the row under the cursor somewhere else.
 function list(state) {
+  if (!state) return []
+  var out = []
+  for (var i = 0; i < state.order.length; i++) {
+    var device = state.devices[state.order[i]]
+    if (device) out.push(device)
+  }
+  return merge(out)
+}
+
+// The unmerged records, for diagnostics.
+function raw(state) {
   if (!state) return []
   var out = []
   for (var i = 0; i < state.order.length; i++) {
@@ -214,6 +358,8 @@ if (typeof module !== "undefined") {
     str: str, num: num, bool: bool,
     capabilities: capabilities, normalize: normalize,
     emptyState: emptyState, apply: apply,
-    list: list, active: active, isActive: isActive, get: get
+    list: list, raw: raw, active: active, isActive: isActive, get: get,
+    merge: merge, mergeGroup: mergeGroup, mergeKey: mergeKey,
+    routeFor: routeFor, mergedLabel: mergedLabel
   }
 }

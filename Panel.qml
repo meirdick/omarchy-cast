@@ -135,8 +135,8 @@ Panel {
     // An unpaired Android TV cannot be driven at all, so the obvious action on
     // its row is to start pairing rather than to send a key that will be
     // dropped.
-    if (device.paired === false) {
-      service.startPairing(device.id)
+    if (device.needsPairing === true) {
+      service.startPairing(device)
       root.pairingFor = device.id
       Qt.callLater(function () { codeField.forceActiveFocus() })
       return
@@ -161,7 +161,7 @@ Panel {
     if (!device || !service || !device.can.seek) return
     var target = Model.positionAt(device, root.nowMs) + seconds
     if (device.duration > 0) target = Math.max(0, Math.min(device.duration, target))
-    service.seek(device.id, Math.max(0, target))
+    service.seek(device, Math.max(0, target))
   }
 
   // -------------------------------------------------------------------- ipc
@@ -179,37 +179,40 @@ Panel {
     function devices(): string {
       if (!root.service) return "[]"
       return JSON.stringify(root.service.devices.map(function (d) {
-        return { id: d.id, name: d.name, kind: d.kind, state: d.state,
+        return { id: d.id, name: d.name, kind: d.kindLabel,
+                 protocols: Object.keys(d.parts), state: d.state,
                  app: d.app, title: d.title, artist: d.artist,
-                 volume: d.volume, paired: d.paired }
+                 volume: d.volume, canVolume: d.can.volume,
+                 canVolumeSteps: d.can.volumeSteps,
+                 paired: d.paired, needsPairing: d.needsPairing === true }
       }), null, 2)
     }
 
     function playPause(id: string): string {
       var device = root.resolve(id)
       if (!device) return "no such device"
-      root.service.playPause(device.id)
+      root.service.playPause(device)
       return device.id
     }
 
     function next(id: string): string {
       var device = root.resolve(id)
       if (!device) return "no such device"
-      root.service.next(device.id)
+      root.service.next(device)
       return device.id
     }
 
     function previous(id: string): string {
       var device = root.resolve(id)
       if (!device) return "no such device"
-      root.service.previous(device.id)
+      root.service.previous(device)
       return device.id
     }
 
     function volume(id: string, level: string): string {
       var device = root.resolve(id)
       if (!device) return "no such device"
-      root.service.setVolume(device.id, parseFloat(level))
+      root.service.setVolume(device, parseFloat(level))
       return device.id
     }
 
@@ -219,11 +222,11 @@ Panel {
       // Sending a code is only meaningful inside a session the helper is
       // already holding, so start one first when the caller has not.
       if (String(code) === "") {
-        root.service.startPairing(device.id)
+        root.service.startPairing(device)
         return "pairing started for " + device.id + " — the code is on the TV"
       }
       root.pairingFor = device.id
-      root.service.finishPairing(device.id, code)
+      root.service.finishPairing(device, code)
       return "code sent to " + device.id
     }
 
@@ -291,13 +294,13 @@ Panel {
       onTabRequested: function (direction) { root.switchPanel(direction) }
       onTextKey: function (text) {
         switch (text) {
-        case "n": root.act(function (d) { if (d.can.next) root.service.next(d.id) }); break
-        case "b": root.act(function (d) { if (d.can.prev) root.service.previous(d.id) }); break
-        case "s": root.act(function (d) { if (d.can.stop) root.service.stop(d.id) }); break
-        case "m": root.act(function (d) { root.service.setMuted(d.id, !d.muted) }); break
+        case "n": root.act(function (d) { if (d.can.next) root.service.next(d) }); break
+        case "b": root.act(function (d) { if (d.can.prev) root.service.previous(d) }); break
+        case "s": root.act(function (d) { if (d.can.stop) root.service.stop(d) }); break
+        case "m": root.act(function (d) { root.service.setMuted(d, !d.muted) }); break
         case "=":
-        case "+": root.act(function (d) { root.service.nudgeVolume(d.id, 1) }); break
-        case "-": root.act(function (d) { root.service.nudgeVolume(d.id, -1) }); break
+        case "+": root.act(function (d) { root.service.nudgeVolume(d, 1) }); break
+        case "-": root.act(function (d) { root.service.nudgeVolume(d, -1) }); break
         case "f": root.togglePreferred(); break
         case "r": if (root.service) root.service.refresh(); break
         case "R": if (root.service) root.service.restartHelper(); break
@@ -438,7 +441,7 @@ Panel {
               onClicked: function (mouse) {
                 if (!root.focusDevice || !root.service) return
                 var fraction = Math.max(0, Math.min(1, mouse.x / width))
-                root.service.seek(root.focusDevice.id,
+                root.service.seek(root.focusDevice,
                                   fraction * root.focusDevice.duration)
               }
             }
@@ -474,22 +477,22 @@ Panel {
             Button {
               text: "󰒮"
               enabled: !!root.focusDevice && root.focusDevice.can.prev
-              onClicked: root.act(function (d) { root.service.previous(d.id) })
+              onClicked: root.act(function (d) { root.service.previous(d) })
             }
             Button {
               text: !!root.focusDevice && root.focusDevice.state === "PLAYING" ? "󰏤" : "󰐊"
               enabled: !!root.focusDevice && root.focusDevice.can.pause
-              onClicked: root.act(function (d) { root.service.playPause(d.id) })
+              onClicked: root.act(function (d) { root.service.playPause(d) })
             }
             Button {
               text: "󰒭"
               enabled: !!root.focusDevice && root.focusDevice.can.next
-              onClicked: root.act(function (d) { root.service.next(d.id) })
+              onClicked: root.act(function (d) { root.service.next(d) })
             }
             Button {
               text: "󰓛"
               enabled: !!root.focusDevice && root.focusDevice.can.stop
-              onClicked: root.act(function (d) { root.service.stop(d.id) })
+              onClicked: root.act(function (d) { root.service.stop(d) })
             }
 
             Item { Layout.fillWidth: true }
@@ -522,7 +525,7 @@ Panel {
             // refuses volume surfaces as an error the moment the panel opens.
             onReleased: function (level) {
               if (root.focusDevice && root.service && root.opened) {
-                root.service.setVolume(root.focusDevice.id, level)
+                root.service.setVolume(root.focusDevice, level)
               }
             }
           }
@@ -544,15 +547,15 @@ Panel {
             }
             Button {
               text: "󰝞"
-              onClicked: root.act(function (d) { root.service.nudgeVolume(d.id, -1) })
+              onClicked: root.act(function (d) { root.service.nudgeVolume(d, -1) })
             }
             Button {
               text: "󰝝"
-              onClicked: root.act(function (d) { root.service.nudgeVolume(d.id, 1) })
+              onClicked: root.act(function (d) { root.service.nudgeVolume(d, 1) })
             }
             Button {
               text: "󰝟"
-              onClicked: root.act(function (d) { root.service.setMuted(d.id, !d.muted) })
+              onClicked: root.act(function (d) { root.service.setMuted(d, !d.muted) })
             }
             Item { Layout.fillWidth: true }
             Text {

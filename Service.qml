@@ -315,31 +315,68 @@ Item {
     }
   }
 
-  function command(cmd, id) { return send({ cmd: cmd, id: id }) }
-  function playPause(id) { return command("playPause", id) }
-  function next(id) { return command("next", id) }
-  function previous(id) { return command("previous", id) }
-  function stop(id) { return command("stop", id) }
-  function seek(id, position) { return send({ cmd: "seek", id: id, position: position }) }
-  function setVolume(id, level) {
-    return send({ cmd: "volume", id: id, level: Math.max(0, Math.min(1, level)) })
+  // One physical device can answer on several protocols, so a command has to
+  // go to the one that can actually carry it: seek to the Cast session, volume
+  // to the Android TV remote. Callers pass the merged device and never think
+  // about it. An id is still accepted, for IPC.
+  function route(target, cmd) {
+    if (!target) return ""
+    if (typeof target === "string") {
+      var known = root.find(target)
+      return known ? Devices.routeFor(known, cmd) : target
+    }
+    return Devices.routeFor(target, cmd)
   }
-  function setMuted(id, muted) { return send({ cmd: "mute", id: id, muted: muted }) }
-  function key(id, name) { return send({ cmd: "key", id: id, key: name }) }
-  function startPairing(id) { return send({ cmd: "pair", id: id }) }
-  function finishPairing(id, code) { return send({ cmd: "pair", id: id, code: String(code) }) }
 
-  function nudgeVolume(id, direction) {
-    var device = Devices.get(root.state, id)
+  // Find a merged device by any of its part ids, or its own.
+  function find(id) {
+    var wanted = String(id || "")
+    for (var i = 0; i < root.devices.length; i++) {
+      var device = root.devices[i]
+      if (device.id === wanted) return device
+      for (var kind in device.parts) {
+        if (device.parts[kind] === wanted) return device
+      }
+    }
+    return null
+  }
+
+  function command(cmd, target) { return send({ cmd: cmd, id: root.route(target, cmd) }) }
+  function playPause(target) { return command("playPause", target) }
+  function next(target) { return command("next", target) }
+  function previous(target) { return command("previous", target) }
+  function stop(target) { return command("stop", target) }
+  function seek(target, position) {
+    return send({ cmd: "seek", id: root.route(target, "seek"), position: position })
+  }
+  function setVolume(target, level) {
+    return send({ cmd: "volume", id: root.route(target, "volume"),
+                  level: Math.max(0, Math.min(1, level)) })
+  }
+  function setMuted(target, muted) {
+    return send({ cmd: "mute", id: root.route(target, "mute"), muted: muted })
+  }
+  function key(target, name) {
+    return send({ cmd: "key", id: root.route(target, "key"), key: String(name) })
+  }
+  function startPairing(target) {
+    return send({ cmd: "pair", id: root.route(target, "key") })
+  }
+  function finishPairing(target, code) {
+    return send({ cmd: "pair", id: root.route(target, "key"), code: String(code) })
+  }
+
+  function nudgeVolume(target, direction) {
+    var device = (typeof target === "string") ? root.find(target) : target
     if (!device) return false
-    // Android TV has no absolute volume, only steps, so it takes the key path
-    // and the slider is approximate there. Saying that here keeps the branch
-    // out of both surfaces.
-    if (device.kind === "androidtv") {
-      return root.key(id, direction > 0 ? "KEYCODE_VOLUME_UP" : "KEYCODE_VOLUME_DOWN")
+    // A device with no volume scale — a Google TV passing audio to a receiver
+    // over HDMI-CEC — can only be nudged, so it takes the key path. Deciding
+    // that here keeps the branch out of both surfaces.
+    if (!device.can.volume && device.can.volumeSteps) {
+      return root.key(device, direction > 0 ? "KEYCODE_VOLUME_UP" : "KEYCODE_VOLUME_DOWN")
     }
     if (!(device.volume >= 0)) return false
-    return root.setVolume(id, device.volume + direction * (root.volumeStep / 100))
+    return root.setVolume(device, device.volume + direction * (root.volumeStep / 100))
   }
 
   function choosePreferred(id) {
@@ -364,8 +401,14 @@ Item {
       missing: root.missing,
       deviceCount: root.devices.length,
       devices: root.devices.map(function (d) {
-        return { id: d.id, name: d.name, kind: d.kind, state: d.state,
-                 app: d.app, title: d.title, paired: d.paired }
+        return { id: d.id, name: d.name, kind: d.kindLabel, state: d.state,
+                 app: d.app, title: d.title, paired: d.paired,
+                 parts: d.parts, volumeId: d.volumeId, keyId: d.keyId,
+                 canVolume: d.can.volume, canSteps: d.can.volumeSteps }
+      }),
+      rawDevices: Devices.raw(root.state).map(function (d) {
+        return { id: d.id, kind: d.kind, host: d.host, state: d.state,
+                 paired: d.paired }
       }),
       barDevice: root.barDevice ? root.barDevice.id : "",
       lastError: root.lastError

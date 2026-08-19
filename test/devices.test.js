@@ -57,10 +57,13 @@ check("missing airplay is explained", /pyatv not installed/.test(mixed.missing.a
 eq("version", mixed.version, "1.0.0")
 
 var all = D.list(mixed)
-eq("bedroom was removed by its gone message", all.length, 4)
+// Four raw records survive the gone message, but the Google TV answers on both
+// Cast and Android TV Remote from one address, so the user sees three devices.
+eq("raw records after the gone message", D.raw(mixed).length, 4)
+eq("merged into physical devices", all.length, 3)
 check("gone id is absent", D.get(mixed, "cast:bbbb2222") === null)
 eq("order is discovery order", all.map(function (d) { return d.kind }).join(","),
-   "cast,cast,airplay,androidtv")
+   "cast,cast,airplay")
 
 var kitchen = D.get(mixed, "cast:aaaa1111")
 eq("error attached to its device", kitchen.error, "connection lost")
@@ -74,12 +77,64 @@ eq("and says why", atv.detail, "needs pairing")
 eq("pairing state tracked", mixed.pairing["androidtv:Android_1AV08283.local"], "awaiting-code")
 eq("kind label for android tv", atv.kindLabel, "Android TV")
 
+console.log("=== merging one physical device ===")
+var den = all[0]
+eq("both protocols folded into one row",
+   Object.keys(den.parts).sort().join("+"), "androidtv+cast")
+eq("labelled as what it is", den.kindLabel, "Google TV")
+eq("the cast session supplies the metadata", den.title, "Hard Livin'")
+// The row showing the track must be the row that changes the volume, or volume
+// looks broken to anyone using it.
+eq("transport routes to the cast session",
+   D.routeFor(den, "seek"), "cast:767a74054b35365ddef41664cdcc2089")
+eq("a part id resolves back to the merged device",
+   D.mergeKey(den), "host:192.168.2.140")
+eq("an unpaired part does not make the whole device unpaired-looking",
+   den.needsPairing, true)
+eq("and it says what pairing would buy", den.detail, "pair for volume and keys")
+
+// A Cast receiver bolted to a TV reports a readable volume and then drops
+// every attempt to set it. It must not win the volume route over a remote that
+// can actually move the volume, however crudely.
+function part(over) {
+  var base = { id: "", kind: "", host: "shared", name: "TV", state: "IDLE",
+               volume: -1, muted: false, volumeFixed: false, paired: true,
+               detail: "", error: "", title: "", artist: "", album: "", art: "",
+               position: 0, duration: 0, rate: 1, at: 0, model: "", app: "",
+               kindLabel: "" }
+  for (var k in over) base[k] = over[k]
+  base.can = D.capabilities(over.can || {})
+  return base
+}
+var fixedCast = part({ id: "cast:f", kind: "cast", volume: 1, volumeFixed: true,
+                       state: "PLAYING", title: "x",
+                       can: { pause: true, seek: true, volume: true } })
+var stepper = part({ id: "atv:f", kind: "androidtv", state: "UNKNOWN",
+                     can: { volumeSteps: true, keys: true } })
+var pair = D.merge([fixedCast, stepper])[0]
+eq("a fixed cast volume does not claim a slider", pair.can.volume, false)
+eq("stepping is offered instead", pair.can.volumeSteps, true)
+eq("and volume routes to the remote", D.routeFor(pair, "volume"), "atv:f")
+eq("while seek still routes to cast", D.routeFor(pair, "seek"), "cast:f")
+
+// A device with no address is never merged: two TVs both called "TV" would
+// otherwise fuse into one.
+var anonA = part({ id: "cast:a", kind: "cast", host: "" })
+var anonB = part({ id: "cast:b", kind: "cast", host: "" })
+eq("addressless devices stay separate", D.merge([anonA, anonB]).length, 2)
+
+// needsPairing is answered the same way whether or not anything was merged.
+var lone = D.merge([part({ id: "airplay:s", kind: "airplay", paired: false })])[0]
+eq("a lone unpaired device says so", lone.needsPairing, true)
+eq("a lone paired device does not",
+   D.merge([part({ id: "cast:s", kind: "cast" })])[0].needsPairing, false)
+
 console.log("=== active vs idle ===")
 var activeIds = D.active(mixed).map(function (d) { return d.id }).sort().join(",")
 eq("buffering counts as active, unknown does not",
    activeIds, "airplay:CC11DD22,cast:767a74054b35365ddef41664cdcc2089,cast:aaaa1111")
 eq("a paused device is active", D.isActive(D.get(mixed, "cast:aaaa1111")), true)
-eq("an unpaired remote is not", D.isActive(atv), false)
+eq("an unpaired remote on its own is not", D.isActive(atv), false)
 
 console.log("=== garbage in ===")
 // The helper is a separate process. It can be killed mid-line, upgraded under
