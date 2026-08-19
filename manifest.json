@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "meirdick.cast",
   "name": "Cast",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "meirdick",
   "license": "MIT",
   "homepage": "https://github.com/meirdick/omarchy-cast",
@@ -18,7 +18,7 @@
   },
   "barWidget": {
     "displayName": "Cast",
-    "description": "What your cast devices are playing, and the controls to drive them. Discovers Chromecast, Google TV, AirPlay and Android TV devices over mDNS and holds a pushed connection, so the bar reflects a change on the TV in about a second. Shows nothing at all when nothing is playing.",
+    "description": "What your cast devices are playing, and the controls to drive them. Discovers Chromecast, Google TV, AirPlay and Android TV devices over mDNS and holds a pushed connection, so the bar reflects a change on the TV in about a second. Can also cast a local file. Shows nothing at all when nothing is playing.",
     "category": "Media",
     "aliases": [
       "cast",
@@ -44,7 +44,9 @@
       "preferredDevice": "",
       "volumeStep": 5,
       "notifyTrack": false,
-      "helperRestartSec": 5
+      "helperRestartSec": 5,
+      "allowFileServing": true,
+      "fileServerPort": 8927
     },
     "schema": [
       {
@@ -137,6 +139,23 @@
         "max": 60,
         "step": 1,
         "defaultValue": 5
+      },
+      {
+        "key": "allowFileServing",
+        "type": "boolean",
+        "label": "Allow casting local files",
+        "description": "Casting a file means this machine opens an HTTP socket that the device fetches it from, reachable by anything on your network for as long as playback lasts. Each file is published under a single-use random token and nothing else is reachable through it, but turning this off removes the ability entirely.",
+        "defaultValue": true
+      },
+      {
+        "key": "fileServerPort",
+        "type": "integer",
+        "label": "File serving port",
+        "description": "The port a cast device fetches a local file from. Fixed rather than random so one firewall rule covers it: on ufw that is `sudo ufw allow 8927/tcp`. Nothing listens on it except while a file is being cast.",
+        "min": 1024,
+        "max": 65535,
+        "step": 1,
+        "defaultValue": 8927
       }
     ]
   }

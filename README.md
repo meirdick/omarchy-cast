@@ -53,6 +53,47 @@ if your libraries live in a different environment.
 Each backend is skipped on its own when its library is missing, and the panel
 says which ones are absent and why rather than leaving you to guess.
 
+## Casting a local file
+
+```bash
+omarchy-cast video.mp4                 # to whatever is playing, or the only device
+omarchy-cast video.mp4 "Den TV"        # to a named device
+omarchy-cast --stop                    # stop, and close the socket
+omarchy-cast --list                    # what is on the network
+```
+
+or from the panel's IPC:
+
+```bash
+omarchy-shell meirdick.cast castFile /path/to/video.mp4 "Den TV"
+```
+
+No cast protocol carries file contents — they all take a URL — so the plugin
+publishes the file over HTTP on your network and hands the device the address.
+That is the largest piece of attack surface here, so it is kept narrow:
+
+- One file per single-use random token. There is no directory listing and no
+  path to traverse: the URL space is exactly the files you chose to cast.
+- Bound to the one interface that reaches the device, not to every network this
+  machine is on.
+- Started only when you cast something, and stopped when playback ends or you
+  press `s`.
+- Set `allowFileServing` to `false` to remove the capability entirely.
+
+**You will need to open the port.** It is fixed at 8927 precisely so a firewall
+rule can name it — a random port cannot be allowed through anything:
+
+```bash
+sudo ufw allow 8927/tcp comment "omarchy-cast file serving"
+```
+
+Without that, the device shows the title and then buffers forever at 0:00,
+because it can see the cast session but cannot fetch a single byte.
+
+Nothing is transcoded. If the file uses a codec the receiver cannot decode, the
+panel says so before playing rather than leaving you with a black screen — that
+check needs `ffprobe`, and is skipped silently when ffmpeg is not installed.
+
 ## What it talks to
 
 | Backend | Finds | Gives you | Needs |
@@ -66,6 +107,18 @@ Everything is local. The plugin holds no credentials, contacts no external
 service, and never touches the Google Home API on port 8443 — that one needs an
 account token, and this does not.
 
+### One device can speak two protocols
+
+A Google TV answers on Cast *and* on Android TV Remote from the same address,
+and they do not overlap: Cast carries the track metadata and transport but its
+volume is refused, while the remote can move the volume and change inputs but
+has no idea what is playing.
+
+The widget shows one row for the device and sends each command to whichever
+protocol can carry it. Listing them separately would be an implementation
+detail on screen, and a misleading one — the row with the track would not be
+the row that changes the volume.
+
 ### A note on Google TV and volume
 
 A Google TV reports `volume.controlType: "fixed"`. The TV and HDMI-CEC own the
@@ -73,8 +126,13 @@ volume, and the receiver channel silently drops any attempt to change it. The
 widget honours that: the slider is hidden rather than shown doing nothing, and
 the panel points you at the Android TV remote instead.
 
-Pair it once — press enter on the unpaired device row, type the six digits the
-TV shows — and volume, power and the D-pad work from the panel.
+Pair it once — press enter on the unpaired device row, type the code the TV
+shows — and volume, power and the D-pad work from the panel.
+
+On the Google TV Streamer specifically, the remote reports `max: 0`: it has no
+volume scale of its own because audio passes through to the TV over HDMI-CEC.
+The panel draws step buttons for that rather than a slider, since a slider
+could neither show nor set the real level.
 
 ### What Cast reports on a Google TV
 
@@ -161,6 +219,8 @@ open a second connection to every device on a two-screen desk.
 | `volumeStep` | `5` | Percent per scroll |
 | `notifyTrack` | `false` | Desktop notification on track change |
 | `helperRestartSec` | `5` | Backoff before restarting a dead helper |
+| `allowFileServing` | `true` | Whether casting a local file is possible at all |
+| `fileServerPort` | `8927` | Port the device fetches a cast file from |
 
 ## IPC
 
@@ -175,6 +235,9 @@ omarchy-shell meirdick.cast pair "den" 418302
 omarchy-shell meirdick.cast state
 omarchy-shell meirdick.cast diagnose          # what the widget believes
 omarchy-shell meirdick.cast restart           # restart the helper
+omarchy-shell meirdick.cast castFile /path/to/file.mp4 "den"
+omarchy-shell meirdick.cast stopCast "den"
+omarchy-shell meirdick.cast serving           # the file being served, if any
 ```
 
 ## Development
@@ -185,7 +248,8 @@ omarchy-shell meirdick.cast restart           # restart the helper
 | `Widget.qml` | The bar slot. Owns no state; reads the service through the shell |
 | `Panel.qml` | The popout. A renderer plus a cursor, nothing more |
 | `Service.qml` | The helper process, the device map, and the settings |
-| `bin/omarchy-cast-helper.py` | Discovery and every device protocol |
+| `bin/omarchy-cast-helper.py` | Discovery, every device protocol, and the file server |
+| `bin/omarchy-cast` | Shell wrapper for casting a file |
 | `Devices.js` | Helper JSON in, one normalized device record out |
 | `Model.js` | Bar text, ranking, position extrapolation, panel rows |
 | `CastMark.qml` | The icon, drawn from rectangles |
@@ -204,7 +268,7 @@ by far the fastest way to debug anything:
 echo '{"cmd":"playPause","id":"cast:<uuid>"}' | ... # or pipe commands in
 ```
 
-### Five things that will cost you an hour
+### Six things that will cost you an hour
 
 - **Editing a `.js` or `.py` file does not hot-reload.** Saving under
   `~/.config/omarchy/plugins/` reloads `.qml`, because `Qt.clearComponentCache()`
@@ -223,6 +287,10 @@ echo '{"cmd":"playPause","id":"cast:<uuid>"}' | ... # or pipe commands in
 - **The injected `settings` object does not reliably follow `shell.json`.**
   `Service.qml` watches the file itself and prefers what it says, so a hand edit
   applies on save rather than on the next restart.
+- **A file server that ignores `Range` looks like it works.** The receiver seeks
+  by asking for a byte range; answer with the whole file from zero and the scrub
+  bar moves while playback jumps back to the start. `parse_range` handles the
+  suffix and open-ended forms, and 416 for a range past the end.
 
 ## Marketplace
 

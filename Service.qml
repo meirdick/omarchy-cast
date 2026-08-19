@@ -106,6 +106,8 @@ Item {
   readonly property int helperRestartSec: intSetting("helperRestartSec", 5, 1, 60)
   readonly property string backendList: String(setting("backends", "cast,airplay,androidtv,avahi"))
   readonly property string pythonSetting: String(setting("pythonPath", ""))
+  readonly property bool allowFileServing: boolSetting("allowFileServing", true)
+  readonly property int fileServerPort: intSetting("fileServerPort", 8927, 1024, 65535)
 
   // ------------------------------------------------------------------- state
 
@@ -123,8 +125,15 @@ Item {
   property var backends: []
   property string helperVersion: ""
   property string lastError: ""
+  property string lastWarning: ""
   property bool helperRunning: false
   property int helperFailures: 0
+
+  // The file currently published over HTTP, if any. Worth surfacing: a socket
+  // is open on the LAN for as long as this is set, and the user should be able
+  // to see that without reading a log.
+  property string servingPath: ""
+  property string servingTitle: ""
 
   // The device that owns the bar. Null is the resting state, and the widget
   // renders nothing at all when it is.
@@ -223,13 +232,18 @@ Item {
     root.ready = false
     root.backends = []
 
+    // $1 an explicit interpreter, $2 the plugin's venv, $3 the helper, then
+    // its flags. Each flag stays its own argument — collapsing them into one
+    // string would hand python a single unparseable argv entry.
     var script =
-      'if [ -n "$1" ]; then exec "$1" "$3" "$4"; ' +
-      'elif [ -x "$2" ]; then exec "$2" "$3" "$4"; ' +
-      'else exec python3 "$3" "$4"; fi'
-    var only = root.backendList !== "" ? "--only=" + root.backendList : "--only=cast,airplay,androidtv,avahi"
+      'if [ -n "$1" ]; then exec "$1" "$3" "$4" "$5"; ' +
+      'elif [ -x "$2" ]; then exec "$2" "$3" "$4" "$5"; ' +
+      'else exec python3 "$3" "$4" "$5"; fi'
+    var only = root.backendList !== ""
+      ? "--only=" + root.backendList : "--only=cast,airplay,androidtv,avahi"
     helper.command = ["sh", "-c", script, "sh",
-                      root.pythonSetting, root.venvPython, root.helperPath, only]
+                      root.pythonSetting, root.venvPython, root.helperPath,
+                      only, "--port=" + root.fileServerPort]
     helper.running = true
     root.helperRunning = true
   }
@@ -275,6 +289,13 @@ Item {
       var id = String(parsed.id)
       root.deviceUpdated(id)
       var now = Devices.get(root.state, id)
+      if (now && root.servingPath !== "" &&
+          (now.state === "IDLE" || now.state === "OFFLINE")) {
+        // Playback ended, so the socket has no reason to stay open.
+        root.send({ cmd: "stopCast", id: id, path: root.servingPath })
+        root.servingPath = ""
+        root.servingTitle = ""
+      }
       if (now && now.title !== "" &&
           (!before || before.title !== now.title || before.artist !== now.artist)) {
         root.trackChanged(id, now.title, now.artist)
@@ -292,6 +313,12 @@ Item {
       root.lastError = String(parsed.message || "")
     } else if (parsed.type === "pairing") {
       root.pairingChanged(String(parsed.id), String(parsed.state))
+    } else if (parsed.type === "casting") {
+      root.servingPath = String(parsed.path || "")
+      root.servingTitle = String(parsed.title || "")
+      root.lastWarning = ""
+    } else if (parsed.type === "warning") {
+      root.lastWarning = String(parsed.message || "")
     }
   }
 
@@ -386,6 +413,26 @@ Item {
                              "preferredDevice", String(id || "")])
   }
 
+  // Casting a local file. The helper publishes it over HTTP on the LAN under a
+  // one-off token and hands the device the URL; nothing is transcoded, so a
+  // file the receiver cannot decode will say so rather than play silently.
+  function castFile(target, path, title) {
+    if (String(path || "") === "") return false
+    if (!root.allowFileServing) {
+      root.lastError = "casting local files is turned off in settings"
+      return false
+    }
+    return send({ cmd: "castFile", id: root.route(target, "seek"),
+                  path: String(path), title: String(title || "") })
+  }
+
+  function stopCast(target) {
+    var path = root.servingPath
+    root.servingPath = ""
+    root.servingTitle = ""
+    return send({ cmd: "stopCast", id: root.route(target, "seek"), path: path })
+  }
+
   function refresh() { root.send({ cmd: "refresh" }) }
 
   // What the widget believes, for `omarchy-shell meirdick.cast diagnose`.
@@ -411,7 +458,9 @@ Item {
                  paired: d.paired }
       }),
       barDevice: root.barDevice ? root.barDevice.id : "",
-      lastError: root.lastError
+      servingPath: root.servingPath,
+      lastError: root.lastError,
+      lastWarning: root.lastWarning
     }, null, 2)
   }
 

@@ -230,6 +230,26 @@ Panel {
       return "code sent to " + device.id
     }
 
+    function castFile(path: string, id: string): string {
+      var device = root.resolve(id)
+      if (!device) return "no such device"
+      if (String(path) === "") return "give a file path"
+      root.service.castFile(device, path, "")
+      return "casting " + path + " to " + device.name
+    }
+
+    function stopCast(id: string): string {
+      var device = root.resolve(id)
+      if (!device) return "no such device"
+      root.service.stopCast(device)
+      return "stopped"
+    }
+
+    function serving(): string {
+      if (!root.service) return ""
+      return root.service.servingPath
+    }
+
     function state(): string {
       return JSON.stringify({
         opened: root.opened, cursor: root.cursorIndex,
@@ -753,6 +773,28 @@ Panel {
             color: root.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
+          }
+
+          // While a file is being served this machine has a socket open on the
+          // LAN. Saying so plainly is the least the widget can do.
+          Text {
+            Layout.fillWidth: true
+            visible: !!root.service && root.service.servingPath !== ""
+            text: "Serving a file to this device over your network · s to stop"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+          }
+
+          Text {
+            Layout.fillWidth: true
+            visible: !!root.service && root.service.lastWarning !== ""
+            text: root.service ? root.service.lastWarning : ""
+            color: root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
           }
         }
       }

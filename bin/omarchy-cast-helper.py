@@ -16,15 +16,21 @@ those are normal, and the process must survive every one of them, because the
 shell restarting it is visible to the user as a bar widget flickering.
 """
 
+import http.server
 import json
+import mimetypes
 import os
 import re
+import secrets
 import shutil
+import socket
+import socketserver
 import subprocess
 import sys
 import threading
 import time
 import traceback
+import urllib.parse
 
 HELPER_VERSION = "1.0.0"
 
@@ -199,6 +205,344 @@ def as_text(value):
         return str(value)
     except Exception:
         return ""
+
+
+# ------------------------------------------------------------- file serving
+#
+# Casting a local file means the device fetches it over HTTP from this machine,
+# because no cast protocol carries file contents — they all take a URL. So the
+# plugin has to open a listening socket on the LAN, which is the largest piece
+# of attack surface it has. It is kept small on purpose:
+#
+#   * One file per opaque 128-bit token. There is no directory listing, no
+#     path traversal to escape, and no way to name a second file: the URL
+#     space is exactly the set of files the user explicitly cast.
+#   * Bound to the single interface that faces the device, not 0.0.0.0.
+#   * Started only when something is cast, and stopped when nothing is left
+#     to serve.
+#   * Regular files only, opened once and re-checked on every request.
+#
+# Range support is not optional. A receiver seeks by asking for a byte range,
+# and a server that ignores Range replies with the whole file from zero — so
+# the scrub bar appears to work and playback silently jumps back to the start.
+
+
+def parse_range(header, size):
+    """Parse one HTTP Range header against a known size.
+
+    Returns (start, end) inclusive, or None when the header is absent or
+    unparseable — in which case the caller sends the whole file. Returns the
+    string "unsatisfiable" when the range is well-formed but outside the file,
+    which requires a 416 rather than a 200.
+
+    Only single ranges are handled. Multi-range requires a multipart response
+    and no cast receiver asks for one.
+    """
+    if not header or size <= 0:
+        return None
+    text = str(header).strip()
+    if not text.lower().startswith("bytes="):
+        return None
+    spec = text[6:].strip()
+    if "," in spec:
+        return None
+    if "-" not in spec:
+        return None
+
+    first, _, last = spec.partition("-")
+    first, last = first.strip(), last.strip()
+
+    try:
+        if first == "":
+            # "bytes=-500" means the final 500 bytes.
+            if last == "":
+                return None
+            length = int(last)
+            if length <= 0:
+                return "unsatisfiable"
+            start = max(0, size - length)
+            return (start, size - 1)
+        start = int(first)
+        if start < 0:
+            return None
+        if start >= size:
+            return "unsatisfiable"
+        if last == "":
+            return (start, size - 1)
+        end = int(last)
+        if end < start:
+            return None
+        return (start, min(end, size - 1))
+    except ValueError:
+        return None
+
+
+def guess_mime(path):
+    """A content type the receiver will accept.
+
+    Cast is strict here: it refuses to play something served as
+    application/octet-stream even when it could decode the bytes.
+    """
+    known = {
+        ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/mp4",
+        ".mkv": "video/x-matroska", ".webm": "video/webm",
+        ".m4a": "audio/mp4", ".mp3": "audio/mpeg", ".flac": "audio/flac",
+        ".ogg": "audio/ogg", ".opus": "audio/ogg", ".wav": "audio/wav",
+        ".aac": "audio/aac",
+    }
+    ext = os.path.splitext(str(path))[1].lower()
+    if ext in known:
+        return known[ext]
+    guessed = mimetypes.guess_type(str(path))[0]
+    return guessed or "video/mp4"
+
+
+def local_ip_for(host):
+    """The address of the interface that reaches `host`.
+
+    Binding to 0.0.0.0 would offer the file on every network this machine is
+    attached to, including a VPN. Asking the routing table which source address
+    reaches the device keeps it on the one link that needs it. No packets are
+    sent — a connected UDP socket only fixes the route.
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect((str(host), 9))
+        return probe.getsockname()[0]
+    except Exception:
+        return ""
+    finally:
+        try:
+            probe.close()
+        except Exception:
+            pass
+
+
+class _OneFileHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    # Silence the default stderr access log; it is noise in the shell log.
+    def log_message(self, *args):
+        pass
+
+    @property
+    def _files(self):
+        return self.server.files
+
+    def _resolve(self):
+        token = urllib.parse.urlparse(self.path).path.lstrip("/")
+        path = self._files.get(token)
+        if not path or not os.path.isfile(path):
+            return None
+        return path
+
+    def do_HEAD(self):
+        self._respond(head_only=True)
+
+    def do_GET(self):
+        self._respond(head_only=False)
+
+    def _respond(self, head_only):
+        path = self._resolve()
+        if path is None:
+            self.send_error(404, "Not found")
+            return
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            self.send_error(404, "Not found")
+            return
+
+        rng = parse_range(self.headers.get("Range"), size)
+        if rng == "unsatisfiable":
+            self.send_response(416)
+            self.send_header("Content-Range", "bytes */%d" % size)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        start, end = rng if rng else (0, size - 1)
+        length = end - start + 1
+
+        self.send_response(206 if rng else 200)
+        self.send_header("Content-Type", guess_mime(path))
+        self.send_header("Content-Length", str(length))
+        self.send_header("Accept-Ranges", "bytes")
+        if rng:
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
+        self.end_headers()
+        if head_only:
+            return
+
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = handle.read(min(256 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            # The receiver stopped, sought elsewhere, or was told to play
+            # something else. Normal, and not worth a log line.
+            pass
+        except Exception:
+            log_exc("serving %s" % path)
+
+
+class _ThreadingServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+# A fixed default port, because a random one cannot be allowed through a
+# firewall. Almost every desktop runs one, and a rule naming a port that
+# changes on every cast is not a rule anyone can write.
+DEFAULT_FILE_PORT = 8927
+
+
+class FileServer:
+    """Serves explicitly cast files, and nothing else."""
+
+    def __init__(self, port=DEFAULT_FILE_PORT):
+        self._httpd = None
+        self._thread = None
+        self._files = {}
+        self._bind = ""
+        self._port = port
+        self._lock = threading.Lock()
+
+    def url_for(self, path, device_host):
+        """Publish one file and return the URL the device should fetch."""
+        real = os.path.realpath(os.path.expanduser(str(path)))
+        if not os.path.isfile(real):
+            raise ValueError("not a file: %s" % real)
+        if not os.access(real, os.R_OK):
+            raise ValueError("not readable: %s" % real)
+
+        bind = local_ip_for(device_host)
+        if not bind:
+            raise ValueError("no route to %s" % device_host)
+
+        with self._lock:
+            if self._httpd is not None and self._bind != bind:
+                # The device is on a different link than last time.
+                self._shutdown_locked()
+            if self._httpd is None:
+                try:
+                    self._httpd = _ThreadingServer((bind, self._port), _OneFileHandler)
+                except OSError as exc:
+                    # Something else already holds the configured port. Falling
+                    # back keeps casting working, but the firewall rule the user
+                    # wrote will not cover it, so say so rather than fail
+                    # mysteriously later.
+                    log("port %d unavailable (%s), falling back to a random one"
+                        % (self._port, exc))
+                    self._httpd = _ThreadingServer((bind, 0), _OneFileHandler)
+                self._httpd.files = self._files
+                self._bind = bind
+                self._thread = threading.Thread(
+                    target=self._httpd.serve_forever, daemon=True)
+                self._thread.start()
+                log("file server listening on %s:%d" % self._httpd.server_address)
+
+            token = secrets.token_urlsafe(16)
+            self._files[token] = real
+            host, port = self._httpd.server_address
+
+        return "http://%s:%d/%s" % (host, port, token), real
+
+    def release(self, path=None):
+        """Forget one file, or all of them, and stop listening if idle."""
+        with self._lock:
+            if path is None:
+                self._files.clear()
+            else:
+                real = os.path.realpath(os.path.expanduser(str(path)))
+                for token in [t for t, p in self._files.items() if p == real]:
+                    del self._files[token]
+            if not self._files:
+                self._shutdown_locked()
+
+    def _shutdown_locked(self):
+        if self._httpd is None:
+            return
+        try:
+            self._httpd.shutdown()
+            self._httpd.server_close()
+        except Exception:
+            pass
+        self._httpd = None
+        self._thread = None
+        self._bind = ""
+
+    def stop(self):
+        self.release(None)
+
+    @property
+    def serving(self):
+        with self._lock:
+            return len(self._files)
+
+
+FILES = FileServer()
+
+
+def set_file_port(port):
+    FILES._port = int(port)
+
+
+# Codecs a Cast receiver will decode. Advisory only: this is used to warn
+# rather than to refuse, because support varies by device generation and
+# guessing wrong should not stop someone casting a file that would have worked.
+CAST_VIDEO = ("h264", "vp8", "vp9", "hevc", "av1", "mpeg4")
+CAST_AUDIO = ("aac", "mp3", "opus", "vorbis", "flac", "eac3", "ac3")
+
+
+def probe_media(path):
+    """Codec, duration and title via ffprobe, when it is installed."""
+    if not shutil.which("ffprobe"):
+        return {}
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "stream=codec_type,codec_name:format=duration,format_tags=title",
+             "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=20,
+        )
+        data = json.loads(proc.stdout or "{}")
+    except Exception:
+        return {}
+
+    out = {"video": "", "audio": "", "duration": 0.0, "title": ""}
+    for stream in data.get("streams", []) or []:
+        kind = stream.get("codec_type")
+        if kind == "video" and not out["video"]:
+            out["video"] = as_text(stream.get("codec_name"))
+        elif kind == "audio" and not out["audio"]:
+            out["audio"] = as_text(stream.get("codec_name"))
+    fmt = data.get("format", {}) or {}
+    out["duration"] = as_float(fmt.get("duration"))
+    out["title"] = as_text((fmt.get("tags") or {}).get("title"))
+    return out
+
+
+def codec_warning(info):
+    """A sentence about what will not play, or empty when it should be fine."""
+    if not info:
+        return ""
+    problems = []
+    if info.get("video") and info["video"] not in CAST_VIDEO:
+        problems.append("video is %s" % info["video"])
+    if info.get("audio") and info["audio"] not in CAST_AUDIO:
+        problems.append("audio is %s" % info["audio"])
+    if not problems:
+        return ""
+    return ("this device may not decode it: " + " and ".join(problems)
+            + ". It will play if the receiver supports it, and show a blank "
+              "screen or silence if not.")
 
 
 # ------------------------------------------------------------ backend contract
@@ -541,6 +885,14 @@ class CastBackend(Backend):
                 # Receiver-level stepping. Works on devices that own their own
                 # volume scale but refuse to be told an absolute level.
                 (cast.volume_up if cmd == "volumeUp" else cast.volume_down)()
+            elif cmd == "castFile":
+                return self._cast_file(cast, mc, key, payload)
+            elif cmd == "stopCast":
+                try:
+                    mc.stop()
+                finally:
+                    FILES.release(payload.get("path"))
+                return True, ""
             elif cmd == "quit":
                 cast.quit_app()
             elif cmd == "refresh":
@@ -553,6 +905,51 @@ class CastBackend(Backend):
         # The receiver will push a MEDIA_STATUS of its own, but echoing our
         # optimistic view immediately keeps the button from feeling dead.
         threading.Timer(0.35, self.publish, args=(key,)).start()
+        return True, ""
+
+    def _cast_file(self, cast, mc, key, payload):
+        """Serve a local file over HTTP and tell the receiver to play it.
+
+        No cast protocol carries file contents; they all take a URL. So the
+        file is published on the LAN under a one-off token and the receiver is
+        handed that URL. Nothing is transcoded — if the device cannot decode
+        the file it says so, and the codec probe warns first.
+        """
+        path = as_text(payload.get("path"))
+        if not path:
+            return False, "no path given"
+
+        with self._lock:
+            info = dict(self._info.get(key) or {})
+        host = info.get("host", "")
+        if not host:
+            return False, "device address unknown"
+
+        try:
+            url, real = FILES.url_for(path, host)
+        except Exception as exc:
+            return False, str(exc)
+
+        probe = probe_media(real)
+        warning = codec_warning(probe)
+        if warning:
+            emit({"type": "warning", "id": "cast:" + key, "message": warning})
+
+        title = as_text(payload.get("title")) or probe.get("title") or \
+            os.path.splitext(os.path.basename(real))[0]
+        mime = guess_mime(real)
+
+        try:
+            mc.play_media(url, mime, title=title, stream_type="BUFFERED")
+            mc.block_until_active(timeout=30)
+        except Exception as exc:
+            FILES.release(real)
+            return False, "the device refused it: %s" % exc
+
+        emit({"type": "casting", "id": "cast:" + key, "path": real,
+              "url": url, "title": title, "mime": mime,
+              "video": probe.get("video", ""), "audio": probe.get("audio", "")})
+        threading.Timer(1.0, self.publish, args=(key,)).start()
         return True, ""
 
     def _set_volume(self, cast, mc, level=None, muted=None):
@@ -1246,6 +1643,26 @@ class AirPlayBackend(Backend):
             elif cmd == "volume":
                 level = max(0.0, min(1.0, as_float(payload.get("level"))))
                 await atv.audio.set_volume(level * 100.0)
+            elif cmd == "castFile":
+                path = as_text(payload.get("path"))
+                host = ""
+                with self._lock:
+                    conf = self._configs.get(ident)
+                if conf is not None:
+                    host = as_text(getattr(conf, "address", ""))
+                if not path or not host:
+                    return False, "no path or address"
+                url, real = FILES.url_for(path, host)
+                warning = codec_warning(probe_media(real))
+                if warning:
+                    emit({"type": "warning", "id": "airplay:" + ident,
+                          "message": warning})
+                await atv.stream.play_url(url)
+                emit({"type": "casting", "id": "airplay:" + ident,
+                      "path": real, "url": url})
+            elif cmd == "stopCast":
+                FILES.release(payload.get("path"))
+                await rc.stop()
             elif cmd == "refresh":
                 pass
             else:
@@ -1725,7 +2142,8 @@ class Helper:
         if cmd == "diagnose":
             emit({"type": "diagnose", "version": HELPER_VERSION,
                   "backends": sorted(self.backends.keys()),
-                  "missing": self.missing})
+                  "missing": self.missing,
+                  "serving": FILES.serving})
             return
         if cmd == "refresh" and not dev_id:
             for backend in self.backends.values():
@@ -1754,6 +2172,7 @@ class Helper:
                 backend.stop()
             except Exception:
                 pass
+        FILES.stop()
         ISLAND.stop()
 
 
@@ -1765,8 +2184,14 @@ def main():
             enabled = {p.strip() for p in arg.split("=", 1)[1].split(",") if p.strip()}
         elif arg.startswith("--without="):
             enabled -= {p.strip() for p in arg.split("=", 1)[1].split(",")}
+        elif arg.startswith("--port="):
+            try:
+                set_file_port(int(arg.split("=", 1)[1]))
+            except ValueError:
+                pass
         elif arg in ("-h", "--help"):
-            sys.stderr.write(__doc__ + "\nOptions: --only=a,b  --without=a,b\n")
+            sys.stderr.write(__doc__ +
+                             "\nOptions: --only=a,b  --without=a,b  --port=N\n")
             return 0
 
     helper = Helper(enabled)
